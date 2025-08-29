@@ -1,34 +1,40 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+/* Global tweaks for a clean industrial dashboard aesthetic */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&amp;display=swap');
+
+:root {
+  --brand-bg: 0 0% 100%; /* light */
+  --brand-ink: 222 47% 11%; /* slate-900 */
+  --brand-accent: 24 95% 53%; /* safety orange */
+  --brand-accent-700: 24 90% 45%;
+  --brand-muted: 210 40% 96%;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
-}
+body { font-family: 'Montserrat', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji'; }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+.app-shell { min-height: 100vh; background: hsl(var(--brand-bg)); }
+.navbar {
+  position: sticky; top: 0; z-index: 40; backdrop-filter: saturate(120%) blur(12px);
+  background: rgba(255,255,255,0.7); border-bottom: 1px solid rgba(0,0,0,0.06);
 }
+.brand-badge { color: hsl(var(--brand-ink)); letter-spacing: 0.06em; font-weight: 700; }
+.brand-dot { color: hsl(var(--brand-accent)); }
 
-.App-link {
-    color: #61dafb;
-}
+.card-glass { background: rgba(255,255,255,0.75); backdrop-filter: blur(14px); border: 1px solid rgba(2,6,23,0.06); }
+.stat-value { color: hsl(var(--brand-ink)); }
+.stat-label { color: rgba(2,6,23,0.6); }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+.btn-primary {
+  background: hsl(var(--brand-accent)); color: white; border-radius: 9999px;
+  transition: background-color 200ms ease, box-shadow 200ms ease;
 }
+.btn-primary:hover { background: hsl(var(--brand-accent-700)); box-shadow: 0 6px 14px rgba(255,111,0,0.25); }
+
+.input, .select, .textarea {
+  border: 1px solid rgba(2,6,23,0.08); border-radius: 12px; background: white; padding: 10px 12px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.input:focus, .select:focus, .textarea:focus { outline: none; border-color: hsl(var(--brand-accent)); box-shadow: 0 0 0 4px rgba(255,111,0,0.14); }
+
+.table-header { background: hsl(var(--brand-muted)); }
+
+/* Avoid universal transitions */
