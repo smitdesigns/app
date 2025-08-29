@@ -94,7 +94,6 @@ class PowderTransaction(BaseModel):
 
 
 class PowderTransactionCreate(BaseModel):
-    powder_id: str
     type: str  # 'receive' | 'consume'
     quantity_kg: float
     note: Optional[str] = None
