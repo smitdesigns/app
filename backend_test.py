@@ -110,6 +110,7 @@ class PowderInventoryAPITester:
             return False
             
         transaction_data = {
+            "powder_id": self.created_powder_id,
             "type": "consume",
             "quantity_kg": 6.0,
             "note": "Test consume transaction"
