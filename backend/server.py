@@ -45,6 +45,14 @@ def ensure_iso_date(d: Optional[str]) -> str:
         return d[:10]
 
 
+def day_bounds_utc(dt: Optional[date_cls] = None) -> Dict[str, str]:
+    """Return ISO start and end (next day) strings with +00:00 offset for range queries."""
+    d = dt or datetime.now(timezone.utc).date()
+    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    return {"start": start.isoformat(), "end": end.isoformat()}
+
+
 # ---------------------
 # Models
 # ---------------------
@@ -262,6 +270,36 @@ async def powder_summary():
         "total_stock_kg": round(total_stock, 2),
         "low_stock_count": low_stock,
     }
+
+
+@api_router.get("/powders/usage/today")
+async def powder_usage_today():
+    bounds = day_bounds_utc()
+    q = {
+        "type": "consume",
+        "timestamp": {"$gte": bounds["start"], "$lt": bounds["end"]},
+    }
+    items = await db.powder_transactions.find(q).to_list(length=None)
+    used = sum(float(i.get("quantity_kg", 0.0)) for i in items)
+    return {"date": bounds["start"][:10], "total_kg": round(used, 2)}
+
+
+@api_router.get("/powders/usage/trend")
+async def powder_usage_trend(days: int = Query(14, ge=1, le=90)):
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days - 1)
+    start_iso = datetime(start.year, start.month, start.day, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    items = await db.powder_transactions.find({"type": "consume", "timestamp": {"$gte": start_iso}}).to_list(length=None)
+    buckets: Dict[str, float] = {}
+    for i in range(days):
+        d = (start + timedelta(days=i)).isoformat()
+        buckets[d] = 0.0
+    for it in items:
+        d = (it.get("timestamp") or "")[:10]
+        if d in buckets:
+            buckets[d] += float(it.get("quantity_kg", 0.0))
+    points = [{"date": d, "qty_kg": v} for d, v in sorted(buckets.items())]
+    return {"days": days, "points": points}
 
 
 # ---------------------

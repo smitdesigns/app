@@ -102,6 +102,29 @@ function useTodayTasks() {
   return { loading, tasks, fetchAll, addTask, updateTask };
 }
 
+// Powder Usage KPI hook
+function usePowderUsage() {
+  const [today, setToday] = useState({ total_kg: 0 });
+  const [trendDays, setTrendDays] = useState(14);
+  const [trend, setTrend] = useState({ days: 14, points: [] });
+
+  const fetchAll = async (days = trendDays) => {
+    try {
+      const [t, tr] = await Promise.all([
+        api.get("/powders/usage/today"),
+        api.get(`/powders/usage/trend?days=${days}`),
+      ]);
+      setToday(t.data);
+      setTrend(tr.data);
+      setTrendDays(days);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  return { today, trend, trendDays, fetchAll };
+}
+
 // Gas usage hook
 function useGas() {
   const [loading, setLoading] = useState(false);
@@ -140,17 +163,24 @@ function useGas() {
   return { loading, today, trendDays, trend, logs, setTrendDays, fetchAll, addLog };
 }
 
-function StatCard({ icon: Icon, label, value, suffix }) {
+function StatCard({ icon: Icon, label, value, suffix, children }) {
   return (
     <Card className="card-glass border rounded-2xl shadow-sm">
-      <CardContent className="p-5 flex items-center gap-4">
-        <div className="w-11 h-11 rounded-xl bg-orange-50 flex items-center justify-center text-orange-600">
-          <Icon size={22} />
+      <CardContent className="p-5">
+        <div className="flex items-center gap-4">
+          <div className="w-11 h-11 rounded-xl bg-orange-50 flex items-center justify-center text-orange-600">
+            <Icon size={22} />
+          </div>
+          <div className="flex-1">
+            <div className="stat-value text-2xl font-semibold">{value}{suffix ? ` ${suffix}` : ""}</div>
+            <div className="stat-label text-sm">{label}</div>
+          </div>
         </div>
-        <div>
-          <div className="stat-value text-2xl font-semibold">{value}{suffix ? ` ${suffix}` : ""}</div>
-          <div className="stat-label text-sm">{label}</div>
-        </div>
+        {children && (
+          <div className="mt-3">
+            {children}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -412,11 +442,13 @@ function Dashboard() {
   const powders = usePowders();
   const tasks = useTodayTasks();
   const gas = useGas();
+  const powderUsage = usePowderUsage();
 
   useEffect(() => {
     powders.fetchAll();
     tasks.fetchAll();
     gas.fetchAll(14);
+    powderUsage.fetchAll(14);
   }, []);
 
   const today = useMemo(() => new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }), []);
@@ -432,9 +464,12 @@ function Dashboard() {
       </div>
 
       <main className="px-6 py-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <StatCard icon={Inbox} label="Total SKUs" value={powders.summary.total_skus} />
           <StatCard icon={Factory} label="Total Stock" value={powders.summary.total_stock_kg} suffix="kg" />
+          <StatCard icon={ArrowUpFromLine} label="Powder Used Today" value={powderUsage.today.total_kg?.toFixed ? powderUsage.today.total_kg.toFixed(1) : powderUsage.today.total_kg} suffix="kg">
+            <Sparkline points={powderUsage.trend.points || []} />
+          </StatCard>
           <StatCard icon={Droplet} label="Low Stock Items" value={powders.summary.low_stock_count} />
           <StatCard icon={Flame} label="Gas Today" value={gas.today.total_qty_kg?.toFixed ? gas.today.total_qty_kg.toFixed(1) : gas.today.total_qty_kg} suffix="kg" />
         </div>
