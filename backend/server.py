@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Query
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,9 +6,9 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
+from typing import List, Optional, Dict
 import uuid
-from datetime import datetime, timezone, date as date_cls
+from datetime import datetime, timezone, date as date_cls, timedelta
 
 
 ROOT_DIR = Path(__file__).parent
@@ -33,10 +33,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def to_iso_date(d: Optional[date_cls]) -> Optional[str]:
-    if d is None:
-        return None
-    return d.isoformat()
+def ensure_iso_date(d: Optional[str]) -> str:
+    """Normalize incoming date string to YYYY-MM-DD (UTC). If None, return today (UTC)."""
+    if not d:
+        return datetime.now(timezone.utc).date().isoformat()
+    # Accept already correct format
+    try:
+        return datetime.fromisoformat(d).date().isoformat()
+    except Exception:
+        # Try YYYY-MM-DD fallback slicing
+        return d[:10]
 
 
 # ---------------------
@@ -125,6 +131,27 @@ class TaskUpdate(BaseModel):
     assignee: Optional[str] = None
 
 
+# New: Gas Usage Models
+class GasLog(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    date: str  # YYYY-MM-DD (UTC)
+    fuel_type: str  # 'LPG' | 'Natural Gas'
+    quantity_kg: float
+    unit_cost: Optional[float] = None
+    total_cost: Optional[float] = None
+    note: Optional[str] = None
+    created_at: str
+
+
+class GasLogCreate(BaseModel):
+    date: Optional[str] = None
+    fuel_type: str
+    quantity_kg: float
+    unit_cost: Optional[float] = None
+    note: Optional[str] = None
+
+
 # ---------------------
 # Health/basic routes
 # ---------------------
@@ -171,21 +198,6 @@ async def create_powder(payload: PowderCreate):
 async def list_powders():
     items = await db.powders.find().sort("name", 1).to_list(1000)
     return [Powder(**it) for it in items]
-
-
-@api_router.get("/powders/summary")
-async def powder_summary():
-    items = await db.powders.find().to_list(1000)
-    total_skus = len(items)
-    total_stock = sum(float(i.get("current_stock_kg", 0.0)) for i in items)
-    low_stock = sum(
-        1 for i in items if float(i.get("current_stock_kg", 0.0)) < float(i.get("safety_stock_kg", 0.0))
-    )
-    return {
-        "total_skus": total_skus,
-        "total_stock_kg": round(total_stock, 2),
-        "low_stock_count": low_stock,
-    }
 
 
 @api_router.get("/powders/{powder_id}", response_model=Powder)
@@ -239,6 +251,17 @@ async def create_powder_transaction(powder_id: str, payload: PowderTransactionCr
     return PowderTransaction(**trx)
 
 
+@api_router.get("/powders/summary")
+async def powder_summary():
+    items = await db.powders.find().to_list(1000)
+    total_skus = len(items)
+    total_stock = sum(float(i.get("current_stock_kg", 0.0)) for i in items)
+    low_stock = sum(1 for i in items if float(i.get("current_stock_kg", 0.0)) < float(i.get("safety_stock_kg", 0.0)))
+    return {
+        "total_skus": total_skus,
+        "total_stock_kg": round(total_stock, 2),
+        "low_stock_count": low_stock,
+    }
 
 
 # ---------------------
@@ -279,6 +302,107 @@ async def update_task(task_id: str, payload: TaskUpdate):
     await db.tasks.update_one({"id": task_id}, {"$set": update})
     new_doc = await db.tasks.find_one({"id": task_id})
     return Task(**new_doc)
+
+
+# ---------------------
+# Gas Usage Endpoints
+# ---------------------
+@api_router.post("/gas/logs", response_model=GasLog)
+async def create_gas_log(payload: GasLogCreate):
+    if payload.quantity_kg is None or payload.quantity_kg <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+    if payload.fuel_type not in ("LPG", "Natural Gas"):
+        raise HTTPException(status_code=400, detail="fuel_type must be 'LPG' or 'Natural Gas'")
+    d = ensure_iso_date(payload.date)
+    total_cost = None
+    if payload.unit_cost is not None:
+        total_cost = float(payload.quantity_kg) * float(payload.unit_cost)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "date": d,
+        "fuel_type": payload.fuel_type,
+        "quantity_kg": float(payload.quantity_kg),
+        "unit_cost": float(payload.unit_cost) if payload.unit_cost is not None else None,
+        "total_cost": total_cost,
+        "note": payload.note,
+        "created_at": now_iso(),
+    }
+    await db.gas_logs.insert_one(doc)
+    return GasLog(**doc)
+
+
+@api_router.get("/gas/logs", response_model=List[GasLog])
+async def list_gas_logs(
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    query: Dict[str, Dict] = {}
+    if start or end:
+        s = ensure_iso_date(start) if start else None
+        e = ensure_iso_date(end) if end else None
+        date_range: Dict[str, str] = {}
+        if s:
+            date_range["$gte"] = s
+        if e:
+            date_range["$lte"] = e
+        query["date"] = date_range
+    items = await db.gas_logs.find(query).sort("date", -1).limit(limit).to_list(length=limit)
+    return [GasLog(**it) for it in items]
+
+
+@api_router.get("/gas/summary/today")
+async def gas_summary_today():
+    today = datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
+    # Today total
+    today_items = await db.gas_logs.find({"date": today_iso}).to_list(length=None)
+    today_qty = sum(float(i.get("quantity_kg", 0.0)) for i in today_items)
+    today_cost = sum(float(i.get("total_cost", 0.0) or 0.0) for i in today_items)
+
+    # Baseline: last 7 days (excluding today)
+    start = (today - timedelta(days=7)).isoformat()
+    window_items = await db.gas_logs.find({"date": {"$gte": start, "$lt": today_iso}}).to_list(length=None)
+    # Aggregate per day
+    day_totals: Dict[str, float] = {}
+    for it in window_items:
+        d = it.get("date")
+        day_totals[d] = day_totals.get(d, 0.0) + float(it.get("quantity_kg", 0.0))
+    baseline_avg = (sum(day_totals.values()) / len(day_totals)) if day_totals else 0.0
+
+    # Simple alert: today > 1.5x baseline and >= 5kg
+    alert = False
+    if today_qty > 0 and baseline_avg > 0 and today_qty >= 5 and today_qty > 1.5 * baseline_avg:
+        alert = True
+    if baseline_avg == 0 and today_qty >= 10:  # if no history yet, large spike
+        alert = True
+
+    return {
+        "date": today_iso,
+        "total_qty_kg": round(today_qty, 2),
+        "total_cost": round(today_cost, 2),
+        "baseline_avg_kg": round(baseline_avg, 2),
+        "alert": alert,
+    }
+
+
+@api_router.get("/gas/trend")
+async def gas_trend(days: int = Query(14, ge=1, le=90)):
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days - 1)
+    start_iso = start.isoformat()
+    items = await db.gas_logs.find({"date": {"$gte": start_iso}}).to_list(length=None)
+    buckets: Dict[str, Dict[str, float]] = {}
+    for i in range(days):
+        d = (start + timedelta(days=i)).isoformat()
+        buckets[d] = {"qty_kg": 0.0, "cost": 0.0}
+    for it in items:
+        d = it.get("date")
+        if d in buckets:
+            buckets[d]["qty_kg"] += float(it.get("quantity_kg", 0.0))
+            buckets[d]["cost"] += float(it.get("total_cost", 0.0) or 0.0)
+    points = [{"date": d, **vals} for d, vals in sorted(buckets.items())]
+    return {"days": days, "points": points}
 
 
 # Include the router in the main app

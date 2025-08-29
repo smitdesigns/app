@@ -14,7 +14,11 @@ import { Textarea } from "./components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table";
 import { Badge } from "./components/ui/badge";
 import { Checkbox } from "./components/ui/checkbox";
-import { Plus, Inbox, Factory, Droplet, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
+import { Calendar } from "./components/ui/calendar";
+import { Plus, Inbox, Factory, Droplet, ArrowDownToLine, ArrowUpFromLine, Flame } from "lucide-react";
+import { format, parseISO } from "date-fns";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -96,6 +100,44 @@ function useTodayTasks() {
   };
 
   return { loading, tasks, fetchAll, addTask, updateTask };
+}
+
+// Gas usage hook
+function useGas() {
+  const [loading, setLoading] = useState(false);
+  const [today, setToday] = useState({ total_qty_kg: 0, total_cost: 0, baseline_avg_kg: 0, alert: false });
+  const [trendDays, setTrendDays] = useState(14);
+  const [trend, setTrend] = useState({ days: 14, points: [] });
+  const [logs, setLogs] = useState([]);
+
+  const fetchAll = async (days = trendDays) => {
+    setLoading(true);
+    try {
+      const [sum, tr, lg] = await Promise.all([
+        api.get("/gas/summary/today"),
+        api.get(`/gas/trend?days=${days}`),
+        api.get("/gas/logs?limit=200"),
+      ]);
+      setToday(sum.data);
+      setTrend(tr.data);
+      setLogs(lg.data);
+      setTrendDays(days);
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to load gas data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addLog = async (payload) => {
+    const res = await api.post("/gas/logs", payload);
+    toast.success("Gas log added");
+    await fetchAll(trendDays);
+    return res.data;
+  };
+
+  return { loading, today, trendDays, trend, logs, setTrendDays, fetchAll, addLog };
 }
 
 function StatCard({ icon: Icon, label, value, suffix }) {
@@ -270,13 +312,111 @@ function AddTaskDialog({ onSubmit }) {
   );
 }
 
+// Gas: Add Log Dialog
+function AddGasLogDialog({ onSubmit }) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(new Date());
+  const [fuel, setFuel] = useState("LPG");
+  const [qty, setQty] = useState("");
+  const [unitCost, setUnitCost] = useState("");
+  const [note, setNote] = useState("");
+
+  const submit = async () => {
+    const q = parseFloat(qty || 0);
+    if (!q || q <= 0) { toast.error("Enter quantity in kg"); return; }
+    await onSubmit({
+      date: date.toISOString().slice(0,10),
+      fuel_type: fuel,
+      quantity_kg: q,
+      unit_cost: unitCost ? parseFloat(unitCost) : undefined,
+      note: note || undefined,
+    });
+    setOpen(false);
+    setQty(""); setUnitCost(""); setNote("");
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button className="btn-primary px-4 py-2 text-sm"><Plus size={16} className="mr-2"/>Add Gas Log</Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-[520px]">
+        <DialogHeader>
+          <DialogTitle>Add gas usage</DialogTitle>
+          <DialogDescription>Daily LPG/Natural Gas usage in kilograms</DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2">
+            <Label>Date</Label>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" className="w-full justify-start">
+                  {format(date, "EEE, dd MMM yyyy")}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="p-0" align="start">
+                <Calendar mode="single" selected={date} onSelect={setDate} />
+              </PopoverContent>
+            </Popover>
+          </div>
+          <div>
+            <Label>Fuel</Label>
+            <Select value={fuel} onValueChange={v => setFuel(v)}>
+              <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="LPG">LPG</SelectItem>
+                <SelectItem value="Natural Gas">Natural Gas</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label>Quantity (kg)</Label>
+            <Input type="number" value={qty} onChange={e => setQty(e.target.value)} placeholder="0" />
+          </div>
+          <div>
+            <Label>Unit Cost (optional)</Label>
+            <Input type="number" value={unitCost} onChange={e => setUnitCost(e.target.value)} placeholder="0" />
+          </div>
+          <div className="col-span-2">
+            <Label>Note (optional)</Label>
+            <Textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Remarks, meter reading, vendor" />
+          </div>
+        </div>
+        <div className="flex justify-end gap-3">
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button className="btn-primary" onClick={submit}>Save</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Simple SVG sparkline
+function Sparkline({ points, height = 56, color = "#f97316" }) {
+  if (!points || points.length === 0) return <div className="h-14" />;
+  const w = Math.max(points.length - 1, 1) * 20; // 20px per day
+  const max = Math.max(...points.map(p => p.qty_kg), 1);
+  const path = points.map((p, i) => {
+    const x = i * 20;
+    const y = height - (p.qty_kg / max) * height;
+    return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+  }).join(" ");
+  return (
+    <svg width={w} height={height} viewBox={`0 0 ${w} ${height}`}>
+      <path d={path} fill="none" stroke={color} strokeWidth="2" />
+    </svg>
+  );
+}
+
 function Dashboard() {
   const powders = usePowders();
   const tasks = useTodayTasks();
+  const gas = useGas();
 
   useEffect(() => {
     powders.fetchAll();
     tasks.fetchAll();
+    gas.fetchAll(14);
   }, []);
 
   const today = useMemo(() => new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }), []);
@@ -292,16 +432,18 @@ function Dashboard() {
       </div>
 
       <main className="px-6 py-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <StatCard icon={Inbox} label="Total SKUs" value={powders.summary.total_skus} />
           <StatCard icon={Factory} label="Total Stock" value={powders.summary.total_stock_kg} suffix="kg" />
           <StatCard icon={Droplet} label="Low Stock Items" value={powders.summary.low_stock_count} />
+          <StatCard icon={Flame} label="Gas Today" value={gas.today.total_qty_kg?.toFixed ? gas.today.total_qty_kg.toFixed(1) : gas.today.total_qty_kg} suffix="kg" />
         </div>
 
         <Tabs defaultValue="inventory" className="w-full">
           <TabsList>
             <TabsTrigger value="inventory">Powder Inventory</TabsTrigger>
             <TabsTrigger value="tasks">Today's Tasks</TabsTrigger>
+            <TabsTrigger value="gas">Gas Usage</TabsTrigger>
           </TabsList>
 
           <TabsContent value="inventory" className="space-y-4">
@@ -381,6 +523,94 @@ function Dashboard() {
                   {tasks.tasks.length === 0 && (
                     <div className="text-sm text-slate-500 py-8 text-center">No tasks for today yet. Add your first task.</div>
                   )}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="gas" className="space-y-4">
+            <Card className="card-glass border rounded-2xl">
+              <CardHeader className="flex-row items-center justify-between">
+                <div>
+                  <CardTitle>Gas Usage</CardTitle>
+                  <CardDescription>Daily LPG/Natural Gas logs with trend and alerts</CardDescription>
+                </div>
+                <AddGasLogDialog onSubmit={gas.addLog} />
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Today</div>
+                      <div className="text-2xl font-semibold">{(gas.today.total_qty_kg || 0).toFixed ? gas.today.total_qty_kg.toFixed(1) : gas.today.total_qty_kg} kg</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Cost Today</div>
+                      <div className="text-2xl font-semibold">₹{(gas.today.total_cost || 0).toFixed ? gas.today.total_cost.toFixed(0) : gas.today.total_cost}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">7-day Avg</div>
+                      <div className="text-2xl font-semibold">{(gas.today.baseline_avg_kg || 0).toFixed ? gas.today.baseline_avg_kg.toFixed(1) : gas.today.baseline_avg_kg} kg</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4 flex items-center gap-3">
+                      <div className={`w-2.5 h-2.5 rounded-full ${gas.today.alert ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+                      <div>
+                        <div className="text-xs text-slate-500">Alert</div>
+                        <div className="text-sm">{gas.today.alert ? 'Abnormal usage' : 'Normal'}</div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-slate-600">Last {gas.trendDays} days</div>
+                  <Select value={String(gas.trendDays)} onValueChange={v => gas.fetchAll(parseInt(v))}>
+                    <SelectTrigger className="w-[140px]"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="7">7 days</SelectItem>
+                      <SelectItem value="14">14 days</SelectItem>
+                      <SelectItem value="30">30 days</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="overflow-x-auto">
+                  <Sparkline points={gas.trend.points || []} />
+                </div>
+
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="table-header">
+                        <TableHead>Date</TableHead>
+                        <TableHead>Fuel</TableHead>
+                        <TableHead className="text-right">Qty (kg)</TableHead>
+                        <TableHead className="text-right">Unit Cost</TableHead>
+                        <TableHead className="text-right">Total</TableHead>
+                        <TableHead>Note</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {gas.logs.map(l => (
+                        <TableRow key={l.id}>
+                          <TableCell>{format(parseISO(`${l.date}T00:00:00Z`), 'dd MMM yyyy')}</TableCell>
+                          <TableCell>{l.fuel_type}</TableCell>
+                          <TableCell className="text-right">{(l.quantity_kg || 0).toFixed ? l.quantity_kg.toFixed(2) : l.quantity_kg}</TableCell>
+                          <TableCell className="text-right">{l.unit_cost ?? '-'}</TableCell>
+                          <TableCell className="text-right">{l.total_cost ?? '-'}</TableCell>
+                          <TableCell className="max-w-[360px] truncate" title={l.note || ''}>{l.note || '-'}</TableCell>
+                        </TableRow>
+                      ))}
+                      {gas.logs.length === 0 && (
+                        <TableRow><TableCell colSpan={6} className="text-center text-slate-500 py-8">No gas logs yet. Add your first entry.</TableCell></TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
                 </div>
               </CardContent>
             </Card>
