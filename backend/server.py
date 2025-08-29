@@ -240,17 +240,6 @@ async def create_powder_transaction(powder_id: str, payload: PowderTransactionCr
     return PowderTransaction(**trx)
 
 
-@api_router.get("/powders/summary")
-async def powder_summary():
-    items = await db.powders.find().to_list(1000)
-    total_skus = len(items)
-    total_stock = sum(float(i.get("current_stock_kg", 0.0)) for i in items)
-    low_stock = sum(1 for i in items if float(i.get("current_stock_kg", 0.0)) < float(i.get("safety_stock_kg", 0.0)))
-    return {
-        "total_skus": total_skus,
-        "total_stock_kg": round(total_stock, 2),
-        "low_stock_count": low_stock,
-    }
 
 
 # ---------------------
