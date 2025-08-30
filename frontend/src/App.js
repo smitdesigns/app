@@ -17,7 +17,8 @@ import { Checkbox } from "./components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
 import { Calendar } from "./components/ui/calendar";
-import { Plus, Inbox, Factory, Droplet, ArrowDownToLine, ArrowUpFromLine, Flame, CheckCircle2, XCircle } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
+import { Plus, Inbox, Factory, Droplet, ArrowDownToLine, ArrowUpFromLine, Flame, CheckCircle2, XCircle, ChevronDown } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -25,23 +26,32 @@ const API = `${BACKEND_URL}/api`;
 
 const api = axios.create({ baseURL: API });
 
-function useJobs() {
-  const [items, setItems] = useState([]);
-  const fetchAll = async () => {
-    try { const res = await api.get("/jobs"); setItems(res.data); } catch (e) { console.error(e); toast.error("Failed to load jobs"); }
+const JOB_STATUSES = ["Pre-treatment", "Spraying", "Curing", "QC", "Dispatch"];
+
+function StatusBadge({ status }) {
+  const map = {
+    "Pre-treatment": "bg-slate-200 text-slate-700",
+    Spraying: "bg-blue-100 text-blue-700",
+    Curing: "bg-amber-100 text-amber-700",
+    QC: "bg-violet-100 text-violet-700",
+    Dispatch: "bg-emerald-100 text-emerald-700",
   };
-  const add = async (payload) => { await api.post("/jobs", payload); toast.success("Job added"); await fetchAll(); };
-  return { items, fetchAll, add };
+  const cls = map[status] || "bg-slate-200 text-slate-700";
+  return <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${cls}`}>{status}</span>;
 }
 
-function useQC() {
-  const [summary, setSummary] = useState({ total: 0, passed: 0, failed: 0, pass_percent: 0 });
-  const [list, setList] = useState([]);
+function useJobs() {
+  const [items, setItems] = useState([]);
+  const [summary, setSummary] = useState({});
   const fetchAll = async () => {
-    try { const [s, l] = await Promise.all([api.get("/qc/summary"), api.get("/qc?limit=100")]); setSummary(s.data); setList(l.data); } catch (e) { console.error(e); toast.error("Failed to load QC data"); }
+    try {
+      const [list, sum] = await Promise.all([api.get("/jobs"), api.get("/jobs/summary")]);
+      setItems(list.data); setSummary(sum.data.counts || {});
+    } catch (e) { console.error(e); toast.error("Failed to load jobs"); }
   };
-  const add = async (payload) => { await api.post("/qc", payload); toast.success("QC recorded"); await fetchAll(); };
-  return { summary, list, fetchAll, add };
+  const add = async (payload) => { await api.post("/jobs", payload); toast.success("Job added"); await fetchAll(); };
+  const updateStatus = async (id, status) => { await api.patch(`/jobs/${id}/status`, { status }); toast.success("Status updated"); await fetchAll(); };
+  return { items, summary, fetchAll, add, updateStatus };
 }
 
 function usePowderUsage() {
@@ -57,7 +67,17 @@ function usePowders() {
   const fetchAll = async () => { try { const [a,b]=await Promise.all([api.get("/powders"), api.get("/powders/summary")]); setItems(a.data); setSummary(b.data); } catch (e) { console.error(e); toast.error("Failed to load powders"); } };
   const addPowder = async (payload) => { await api.post("/powders", payload); toast.success("Powder added"); await fetchAll(); };
   const transact = async (powderId, payload) => { await api.post(`/powders/${powderId}/transactions`, payload); toast.success(payload.type==='receive'?'Stock received':'Stock consumed'); await fetchAll(); };
-  return { items, summary, fetchAll, addPowder, transact };
+  const downloadCSV = async () => {
+    try {
+      const d = new Date().toISOString().slice(0,10);
+      const res = await api.get(`/powders/export/csv?date=${d}`, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = `powder_stock_${d}.csv`; document.body.appendChild(a); a.click(); a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) { console.error(e); toast.error("CSV export failed"); }
+  };
+  return { items, summary, fetchAll, addPowder, transact, downloadCSV };
 }
 
 function useGas() {
@@ -65,8 +85,7 @@ function useGas() {
   const [trend, setTrend] = useState({ days: 14, points: [] });
   const [logs, setLogs] = useState([]);
   const fetchAll = async (days = 14) => { try { const [sum,tr,lg]=await Promise.all([api.get("/gas/summary/today"), api.get(`/gas/trend?days=${days}`), api.get("/gas/logs?limit=200")]); setToday(sum.data); setTrend(tr.data); setLogs(lg.data); } catch(e){ console.error(e); toast.error("Failed to load gas data"); } };
-  const addLog = async (payload) => { await api.post("/gas/logs", payload); toast.success("Gas log added"); await fetchAll(14); };
-  return { today, trend, logs, fetchAll, addLog };
+  return { today, trend, logs, fetchAll };
 }
 
 function Sparkline({ points, height = 56, color = "#f97316" }) {
@@ -83,16 +102,8 @@ function AddJobDialog({ onSubmit }) {
   const set = (k,v) => setForm(prev=>({ ...prev, [k]: v }));
   const submit = async () => {
     if (!form.job_id) { toast.error("Enter Job ID"); return; }
-    await onSubmit({
-      job_id: form.job_id,
-      client: form.client || undefined,
-      part: form.part || undefined,
-      color: form.color || undefined,
-      micron: form.micron || undefined,
-      status: form.status || undefined,
-    });
-    setOpen(false);
-    setForm({ job_id: "", client: "", part: "", color: "", micron: "", status: "Pre-treatment" });
+    await onSubmit({ job_id: form.job_id, client: form.client || undefined, part: form.part || undefined, color: form.color || undefined, micron: form.micron || undefined, status: form.status || undefined });
+    setOpen(false); setForm({ job_id: "", client: "", part: "", color: "", micron: "", status: "Pre-treatment" });
   };
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -110,11 +121,7 @@ function AddJobDialog({ onSubmit }) {
             <Select value={form.status} onValueChange={v=>set('status', v)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="Pre-treatment">Pre-treatment</SelectItem>
-                <SelectItem value="Spraying">Spraying</SelectItem>
-                <SelectItem value="Curing">Curing</SelectItem>
-                <SelectItem value="QC">QC</SelectItem>
-                <SelectItem value="Dispatch">Dispatch</SelectItem>
+                {JOB_STATUSES.map(s => (<SelectItem key={s} value={s}>{s}</SelectItem>))}
               </SelectContent>
             </Select>
           </div>
@@ -125,7 +132,7 @@ function AddJobDialog({ onSubmit }) {
   );
 }
 
-function JobsTable({ rows }) {
+function JobsTable({ rows, onChangeStatus }) {
   return (
     <Card className="card-glass border rounded-2xl">
       <CardHeader className="flex-row items-center justify-between"><div><CardTitle>Jobs</CardTitle><CardDescription>Backbone for linking Powder/Gas/QC</CardDescription></div></CardHeader>
@@ -140,6 +147,7 @@ function JobsTable({ rows }) {
                 <TableHead>Color</TableHead>
                 <TableHead>Micron</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead></TableHead>
                 <TableHead>Created</TableHead>
               </TableRow>
             </TableHeader>
@@ -151,13 +159,41 @@ function JobsTable({ rows }) {
                   <TableCell>{r.part || '-'}</TableCell>
                   <TableCell>{r.color || '-'}</TableCell>
                   <TableCell>{r.micron || '-'}</TableCell>
-                  <TableCell>{r.status}</TableCell>
+                  <TableCell><StatusBadge status={r.status} /></TableCell>
+                  <TableCell>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="sm" className="flex items-center gap-1">Change <ChevronDown size={14}/></Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        {JOB_STATUSES.map(s => (
+                          <DropdownMenuItem key={s} onClick={() => onChangeStatus(r.id, s)}>{s}</DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
                   <TableCell>{format(parseISO(r.created_at), 'dd MMM yyyy')}</TableCell>
                 </TableRow>
               ))}
-              {rows.length === 0 && (<TableRow><TableCell colSpan={7} className="text-center text-slate-500 py-8">No jobs yet. Add your first job.</TableCell></TableRow>)}
+              {rows.length === 0 && (<TableRow><TableCell colSpan={8} className="text-center text-slate-500 py-8">No jobs yet. Add your first job.</TableCell></TableRow>)}
             </TableBody>
           </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function QCSummaryCard({ summary }) {
+  return (
+    <Card className="card-glass border rounded-2xl">
+      <CardHeader><CardTitle>QC Summary</CardTitle><CardDescription>Pass rate and totals</CardDescription></CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-4 gap-3 text-center">
+          <div><div className="text-xs text-slate-500">Total</div><div className="text-xl font-semibold">{summary.total}</div></div>
+          <div><div className="text-xs text-emerald-600">Passed</div><div className="text-xl font-semibold">{summary.passed}</div></div>
+          <div><div className="text-xs text-rose-600">Failed</div><div className="text-xl font-semibold">{summary.failed}</div></div>
+          <div><div className="text-xs text-slate-500">Pass %</div><div className="text-xl font-semibold">{summary.pass_percent}%</div></div>
         </div>
       </CardContent>
     </Card>
@@ -191,22 +227,6 @@ function QCForm({ onSubmit }) {
   );
 }
 
-function QCSummaryCard({ summary }) {
-  return (
-    <Card className="card-glass border rounded-2xl">
-      <CardHeader><CardTitle>QC Summary</CardTitle><CardDescription>Pass rate and totals</CardDescription></CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-4 gap-3 text-center">
-          <div><div className="text-xs text-slate-500">Total</div><div className="text-xl font-semibold">{summary.total}</div></div>
-          <div><div className="text-xs text-emerald-600">Passed</div><div className="text-xl font-semibold">{summary.passed}</div></div>
-          <div><div className="text-xs text-rose-600">Failed</div><div className="text-xl font-semibold">{summary.failed}</div></div>
-          <div><div className="text-xs text-slate-500">Pass %</div><div className="text-xl font-semibold">{summary.pass_percent}%</div></div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function QCTable({ rows }) {
   return (
     <Card className="card-glass border rounded-2xl">
@@ -234,6 +254,49 @@ function QCTable({ rows }) {
                 </TableRow>
               ))}
               {rows.length === 0 && (<TableRow><TableCell colSpan={5} className="text-center text-slate-500 py-8">No QC checks yet. Add your first record.</TableCell></TableRow>)}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Inventory({ powders }) {
+  return (
+    <Card className="card-glass border rounded-2xl">
+      <CardHeader className="flex-row items-center justify-between">
+        <div>
+          <CardTitle>Powders</CardTitle>
+          <CardDescription>Manage powder stock in kilograms</CardDescription>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={powders.downloadCSV}>Download CSV Report</Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow className="table-header">
+                <TableHead>Name</TableHead>
+                <TableHead>Color</TableHead>
+                <TableHead>Supplier</TableHead>
+                <TableHead className="text-right">Stock (kg)</TableHead>
+                <TableHead className="text-right">Safety (kg)</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {powders.items.map(p => (
+                <TableRow key={p.id}>
+                  <TableCell className="font-medium">{p.name}</TableCell>
+                  <TableCell>{p.color || '-'}</TableCell>
+                  <TableCell>{p.supplier || '-'}</TableCell>
+                  <TableCell className="text-right">{p.current_stock_kg?.toFixed ? p.current_stock_kg.toFixed(2) : p.current_stock_kg}</TableCell>
+                  <TableCell className="text-right">{p.safety_stock_kg?.toFixed ? p.safety_stock_kg.toFixed(2) : p.safety_stock_kg}</TableCell>
+                </TableRow>
+              ))}
+              {powders.items.length === 0 && (<TableRow><TableCell colSpan={5} className="text-center text-slate-500 py-8">No powders yet.</TableCell></TableRow>)}
             </TableBody>
           </Table>
         </div>
@@ -282,11 +345,11 @@ export default function App() {
             </TabsList>
 
             <TabsContent value="inventory" className="space-y-4">
-              {/* Inventory table remains (omitted for brevity) */}
+              <Inventory powders={powders} />
             </TabsContent>
 
             <TabsContent value="gas" className="space-y-4">
-              {/* Gas UI as previously implemented */}
+              {/* Gas module UI assumed present earlier; keeping lean here */}
             </TabsContent>
 
             <TabsContent value="qc" className="space-y-4">
@@ -296,8 +359,13 @@ export default function App() {
             </TabsContent>
 
             <TabsContent value="jobs" className="space-y-4">
-              <div className="flex justify-end"><AddJobDialog onSubmit={jobs.add} /></div>
-              <JobsTable rows={jobs.items} />
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                {JOB_STATUSES.map(s => (
+                  <Card key={s}><CardContent className="p-3 text-center"><div className="text-xs text-slate-500">{s}</div><div className="text-xl font-semibold">{jobs.summary[s] || 0}</div></CardContent></Card>
+                ))}
+                <div className="flex md:col-span-1 justify-end"><AddJobDialog onSubmit={jobs.add} /></div>
+              </div>
+              <JobsTable rows={jobs.items} onChangeStatus={jobs.updateStatus} />
             </TabsContent>
           </Tabs>
         </main>

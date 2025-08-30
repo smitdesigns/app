@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -185,6 +185,9 @@ class QCCheckCreate(BaseModel):
 
 
 # New: Jobs Models
+JOB_STATUSES = ["Pre-treatment", "Spraying", "Curing", "QC", "Dispatch"]
+
+
 class Job(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -203,7 +206,11 @@ class JobCreate(BaseModel):
     part: Optional[str] = None
     color: Optional[str] = None
     micron: Optional[str] = None
-    status: Optional[str] = None  # default applied on server
+    status: Optional[str] = None
+
+
+class JobStatusUpdate(BaseModel):
+    status: str
 
 
 # ---------------------
@@ -342,6 +349,42 @@ async def powder_usage_trend(days: int = Query(14, ge=1, le=90)):
             buckets[d] += float(it.get("quantity_kg", 0.0))
     points = [{"date": d, "qty_kg": v} for d, v in sorted(buckets.items())]
     return {"days": days, "points": points}
+
+
+@api_router.get("/powders/export/csv")
+async def export_powder_csv(date: Optional[str] = Query(None)):
+    """CSV columns: Date | Shade | Opening Stock | Received | Used | Closing Stock"""
+    target = ensure_iso_date(date)
+    # Pre-fetch all powders
+    powders = await db.powders.find().to_list(length=None)
+    bounds = day_bounds_utc(datetime.fromisoformat(target).date())
+    rows = []
+    for p in powders:
+        pid = p.get("id")
+        closing = float(p.get("current_stock_kg", 0.0))
+        # Today transactions
+        q = {"powder_id": pid, "timestamp": {"$gte": bounds["start"], "$lt": bounds["end"]}}
+        trxs = await db.powder_transactions.find(q).to_list(length=None)
+        received = sum(float(t.get("quantity_kg", 0.0)) for t in trxs if t.get("type") == "receive")
+        used = sum(float(t.get("quantity_kg", 0.0)) for t in trxs if t.get("type") == "consume")
+        net = received - used
+        opening = closing - net
+        if opening < 0:
+            opening = 0.0
+        rows.append({
+            "date": target,
+            "shade": p.get("name", "-"),
+            "opening": round(opening, 2),
+            "received": round(received, 2),
+            "used": round(used, 2),
+            "closing": round(closing, 2),
+        })
+    # Build CSV
+    header = "Date,Shade,Opening Stock,Received,Used,Closing Stock"
+    lines = [header] + [f"{r['date']},{r['shade']},{r['opening']},{r['received']},{r['used']},{r['closing']}" for r in rows]
+    csv_text = "\n".join(lines)
+    filename = f"powder_stock_{target}.csv"
+    return Response(content=csv_text, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 # ---------------------
@@ -549,6 +592,26 @@ async def add_job(payload: JobCreate):
 async def list_jobs(limit: int = Query(200, ge=1, le=1000)):
     items = await db.jobs.find().sort("created_at", -1).limit(limit).to_list(length=limit)
     return [Job(**it) for it in items]
+
+
+@api_router.patch("/jobs/{id}/status", response_model=Job)
+async def update_job_status(id: str, payload: JobStatusUpdate):
+    if payload.status not in JOB_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    it = await db.jobs.find_one({"id": id})
+    if not it:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await db.jobs.update_one({"id": id}, {"$set": {"status": payload.status}})
+    new_doc = await db.jobs.find_one({"id": id})
+    return Job(**new_doc)
+
+
+@api_router.get("/jobs/summary")
+async def jobs_summary():
+    out = {}
+    for st in JOB_STATUSES:
+        out[st] = int(await db.jobs.count_documents({"status": st}))
+    return {"statuses": JOB_STATUSES, "counts": out}
 
 
 # Include the router in the main app
