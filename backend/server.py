@@ -184,6 +184,28 @@ class QCCheckCreate(BaseModel):
     notes: Optional[str] = None
 
 
+# New: Jobs Models
+class Job(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    job_id: str
+    client: Optional[str] = None
+    part: Optional[str] = None
+    color: Optional[str] = None
+    micron: Optional[str] = None
+    status: str
+    created_at: str
+
+
+class JobCreate(BaseModel):
+    job_id: str
+    client: Optional[str] = None
+    part: Optional[str] = None
+    color: Optional[str] = None
+    micron: Optional[str] = None
+    status: Optional[str] = None  # default applied on server
+
+
 # ---------------------
 # Health/basic routes
 # ---------------------
@@ -501,6 +523,32 @@ async def qc_summary():
         "failed": failed,
         "pass_percent": round(pass_percent, 1),
     }
+
+
+# ---------------------
+# Jobs Endpoints
+# ---------------------
+@api_router.post("/jobs", response_model=Job)
+async def add_job(payload: JobCreate):
+    now = now_iso()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "job_id": payload.job_id,
+        "client": payload.client,
+        "part": payload.part,
+        "color": payload.color,
+        "micron": payload.micron,
+        "status": payload.status or "Pre-treatment",
+        "created_at": now,
+    }
+    await db.jobs.insert_one(doc)
+    return Job(**doc)
+
+
+@api_router.get("/jobs", response_model=List[Job])
+async def list_jobs(limit: int = Query(200, ge=1, le=1000)):
+    items = await db.jobs.find().sort("created_at", -1).limit(limit).to_list(length=limit)
+    return [Job(**it) for it in items]
 
 
 # Include the router in the main app
