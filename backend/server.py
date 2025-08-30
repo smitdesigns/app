@@ -37,16 +37,13 @@ def ensure_iso_date(d: Optional[str]) -> str:
     """Normalize incoming date string to YYYY-MM-DD (UTC). If None, return today (UTC)."""
     if not d:
         return datetime.now(timezone.utc).date().isoformat()
-    # Accept already correct format
     try:
         return datetime.fromisoformat(d).date().isoformat()
     except Exception:
-        # Try YYYY-MM-DD fallback slicing
         return d[:10]
 
 
 def day_bounds_utc(dt: Optional[date_cls] = None) -> Dict[str, str]:
-    """Return ISO start and end (next day) strings with +00:00 offset for range queries."""
     d = dt or datetime.now(timezone.utc).date()
     start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
@@ -129,7 +126,7 @@ class TaskCreate(BaseModel):
     title: str
     description: Optional[str] = None
     assignee: Optional[str] = None
-    date: Optional[str] = None  # if not provided, server will set to today (UTC)
+    date: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -158,6 +155,33 @@ class GasLogCreate(BaseModel):
     quantity_kg: float
     unit_cost: Optional[float] = None
     note: Optional[str] = None
+
+
+# New: QC Models
+class QCCheck(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    job_id: Optional[str] = None
+    date: str
+    color_match: bool
+    surface_finish: bool
+    micron_thickness: bool
+    adhesion: bool
+    status: str  # pass | fail
+    checked_by: str
+    notes: Optional[str] = None
+    created_at: str
+
+
+class QCCheckCreate(BaseModel):
+    job_id: Optional[str] = None
+    date: Optional[str] = None
+    color_match: bool
+    surface_finish: bool
+    micron_thickness: bool
+    adhesion: bool
+    checked_by: str
+    notes: Optional[str] = None
 
 
 # ---------------------
@@ -244,7 +268,6 @@ async def create_powder_transaction(powder_id: str, payload: PowderTransactionCr
     if new_stock < 0:
         raise HTTPException(status_code=400, detail="Insufficient stock")
 
-    # Apply stock update and create transaction
     await db.powders.update_one({"id": powder_id}, {"$set": {"current_stock_kg": new_stock, "updated_at": now_iso()}})
 
     trx = {
@@ -275,10 +298,7 @@ async def powder_summary():
 @api_router.get("/powders/usage/today")
 async def powder_usage_today():
     bounds = day_bounds_utc()
-    q = {
-        "type": "consume",
-        "timestamp": {"$gte": bounds["start"], "$lt": bounds["end"]},
-    }
+    q = {"type": "consume", "timestamp": {"$gte": bounds["start"], "$lt": bounds["end"]}}
     items = await db.powder_transactions.find(q).to_list(length=None)
     used = sum(float(i.get("quantity_kg", 0.0)) for i in items)
     return {"date": bounds["start"][:10], "total_kg": round(used, 2)}
@@ -393,26 +413,22 @@ async def list_gas_logs(
 async def gas_summary_today():
     today = datetime.now(timezone.utc).date()
     today_iso = today.isoformat()
-    # Today total
     today_items = await db.gas_logs.find({"date": today_iso}).to_list(length=None)
     today_qty = sum(float(i.get("quantity_kg", 0.0)) for i in today_items)
     today_cost = sum(float(i.get("total_cost", 0.0) or 0.0) for i in today_items)
 
-    # Baseline: last 7 days (excluding today)
     start = (today - timedelta(days=7)).isoformat()
     window_items = await db.gas_logs.find({"date": {"$gte": start, "$lt": today_iso}}).to_list(length=None)
-    # Aggregate per day
     day_totals: Dict[str, float] = {}
     for it in window_items:
         d = it.get("date")
         day_totals[d] = day_totals.get(d, 0.0) + float(it.get("quantity_kg", 0.0))
     baseline_avg = (sum(day_totals.values()) / len(day_totals)) if day_totals else 0.0
 
-    # Simple alert: today > 1.5x baseline and >= 5kg
     alert = False
     if today_qty > 0 and baseline_avg > 0 and today_qty >= 5 and today_qty > 1.5 * baseline_avg:
         alert = True
-    if baseline_avg == 0 and today_qty >= 10:  # if no history yet, large spike
+    if baseline_avg == 0 and today_qty >= 10:
         alert = True
 
     return {
@@ -441,6 +457,50 @@ async def gas_trend(days: int = Query(14, ge=1, le=90)):
             buckets[d]["cost"] += float(it.get("total_cost", 0.0) or 0.0)
     points = [{"date": d, **vals} for d, vals in sorted(buckets.items())]
     return {"days": days, "points": points}
+
+
+# ---------------------
+# QC Endpoints
+# ---------------------
+@api_router.post("/qc", response_model=QCCheck)
+async def add_qc_check(payload: QCCheckCreate):
+    d = ensure_iso_date(payload.date)
+    status = "pass" if (payload.color_match and payload.surface_finish and payload.micron_thickness and payload.adhesion) else "fail"
+    doc = {
+        "id": str(uuid.uuid4()),
+        "job_id": payload.job_id,
+        "date": d,
+        "color_match": bool(payload.color_match),
+        "surface_finish": bool(payload.surface_finish),
+        "micron_thickness": bool(payload.micron_thickness),
+        "adhesion": bool(payload.adhesion),
+        "status": status,
+        "checked_by": payload.checked_by,
+        "notes": payload.notes,
+        "created_at": now_iso(),
+    }
+    await db.qc_checks.insert_one(doc)
+    return QCCheck(**doc)
+
+
+@api_router.get("/qc", response_model=List[QCCheck])
+async def list_qc_checks(limit: int = Query(50, ge=1, le=500)):
+    items = await db.qc_checks.find().sort([("date", -1), ("created_at", -1)]).limit(limit).to_list(length=limit)
+    return [QCCheck(**it) for it in items]
+
+
+@api_router.get("/qc/summary")
+async def qc_summary():
+    total = await db.qc_checks.count_documents({})
+    passed = await db.qc_checks.count_documents({"status": "pass"})
+    failed = int(total) - int(passed)
+    pass_percent = (float(passed) / float(total) * 100.0) if total else 0.0
+    return {
+        "total": int(total),
+        "passed": int(passed),
+        "failed": failed,
+        "pass_percent": round(pass_percent, 1),
+    }
 
 
 # Include the router in the main app
